@@ -930,19 +930,66 @@ def _fetch_fred(series_id: str) -> Optional[pd.Series]:
 
 def get_series(ticker: str, tf: str) -> Optional[pd.Series]:
     """Return price/yield series resampled to the requested timeframe."""
-    rule  = TIMEFRAMES[tf]
+    rule = TIMEFRAMES[tf]
 
-    # fred: prefix — direct FRED fetch, completely standalone
+    # fred: prefix — inline FRED call, NO caching so it always executes
+    # and always writes to the fetch log
     if ticker.startswith("fred:"):
-        daily = _fetch_fred(ticker[5:])
+        series_id = ticker[5:]
+        st.session_state.setdefault("fred_cache", {})
+        if series_id in st.session_state["fred_cache"]:
+            daily = st.session_state["fred_cache"][series_id]
+            _log("info", f"  FRED:{series_id} — session cache hit")
+        else:
+            daily = None
+            try:
+                url  = (f"https://fred.stlouisfed.org/graph/"
+                        f"fredgraph.csv?id={series_id}")
+                _log("info", f"  FRED:{series_id} — fetching {url}")
+                resp = requests.get(url, timeout=30, headers={
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+                    "Accept":     "text/csv,text/plain,*/*",
+                })
+                _log("info",
+                     f"  FRED:{series_id} → HTTP {resp.status_code} "
+                     f"({len(resp.text)} chars) "
+                     f"preview: {resp.text[:60]!r}")
+                if resp.ok and len(resp.text) > 50:
+                    df            = pd.read_csv(StringIO(resp.text))
+                    df.columns    = ["Date", "Value"]
+                    df["Date"]    = pd.to_datetime(df["Date"],  errors="coerce")
+                    df["Value"]   = pd.to_numeric(df["Value"],  errors="coerce")
+                    df = df.dropna().set_index("Date").sort_index()
+                    if not df.empty:
+                        idx   = pd.date_range(df.index[0],
+                                              pd.Timestamp.now(), freq="D")
+                        s     = (df["Value"].reindex(idx)
+                                           .interpolate("linear")
+                                           .dropna())
+                        s     = _clean(s)
+                        if s is not None and len(s) >= 20:
+                            _log("ok",
+                                 f"  FRED:{series_id} OK — "
+                                 f"{len(s)} daily rows, "
+                                 f"latest={s.iloc[-1]:.4f}")
+                            daily = s
+                            st.session_state["fred_cache"][series_id] = s
+                        else:
+                            _log("fail",
+                                 f"  FRED:{series_id} too few rows: "
+                                 f"{len(s) if s is not None else 0}")
+                    else:
+                        _log("fail", f"  FRED:{series_id} empty dataframe")
+                else:
+                    _log("fail",
+                         f"  FRED:{series_id} bad response: "
+                         f"status={resp.status_code}")
+            except Exception as e:
+                _log("fail", f"  FRED:{series_id} exception: {e}")
 
-    elif ticker == "^TNGB":
+    elif ticker == "^TNGB" or ticker == "bond:GB":
         daily = _uk10y_daily()
-    elif ticker == "^TNJP":
-        daily = _jp10y_daily()
-    elif ticker == "bond:GB":
-        daily = _uk10y_daily()
-    elif ticker == "bond:JP":
+    elif ticker == "^TNJP" or ticker == "bond:JP":
         daily = _jp10y_daily()
     elif ticker.startswith("bond:"):
         daily = _bond_yield_daily(ticker[5:])
@@ -951,11 +998,9 @@ def get_series(ticker: str, tf: str) -> Optional[pd.Series]:
 
     if daily is None:
         return None
-
     daily = _clean(daily)
     if daily is None:
         return None
-
     result = _resample(daily, rule) if rule != "D" else daily
     if result is None or result.empty:
         return None
@@ -1144,6 +1189,7 @@ def main():
         if st.button("↺  Refresh data", use_container_width=True):
             st.cache_data.clear()
             _FETCH_LOG.clear()
+            st.session_state.pop("fred_cache", None)
             st.rerun()
 
         st.caption(f"Updated: {datetime.utcnow().strftime('%H:%M UTC')}")
