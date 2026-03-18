@@ -2,84 +2,52 @@ import streamlit as st
 import requests
 import pandas as pd
 from io import StringIO
+import json
 
-st.title("Bond yield source test — GB + JP focus")
-st.caption("ECB EA aggregate confirmed working. Now finding GB + JP sources.")
+st.title("OECD parser test")
+st.caption("OECD v2 returned HTTP 200 for GBR and JPN. Now parsing it.")
 
-if st.button("Run tests"):
+if st.button("Run parser test"):
 
-    # ── ECB EA aggregate (confirmed working) — parse it ───────────────────────
-    st.subheader("ECB EA aggregate — parse test")
-    try:
-        url = ("https://data-api.ecb.europa.eu/service/data/"
-               "YC/B.U2.EUR.4F.G_N_A.SV_C_YM.SR_10Y"
-               "?format=csvdata&startPeriod=2020-01-01")
-        r = requests.get(url, timeout=20)
-        df = pd.read_csv(StringIO(r.text))
-        st.write(f"Columns: {df.columns.tolist()}")
-        st.write(f"Rows: {len(df)}")
-        st.write(df.tail(3))
-    except Exception as e:
-        st.error(f"ECB parse error: {e}")
+    # Test OECD for all 4 countries
+    for country_code, label in [("GBR","GB"), ("JPN","JP"), ("DEU","DE"), ("FRA","FR")]:
+        st.subheader(f"{label} — {country_code}")
+        try:
+            url = (f"https://stats.oecd.org/sdmx-json/data/KEI/"
+                   f"IRLTLT01.{country_code}.ST.M/all"
+                   f"?startTime=2000-01&endTime=2025-12")
+            r = requests.get(url, timeout=30, headers={"User-Agent":"Mozilla/5.0"})
+            st.write(f"HTTP {r.status_code} — {len(r.text)} chars")
+
+            if r.status_code == 200:
+                data = r.json()
+
+                # Extract time periods
+                obs_dims = data["structure"]["dimensions"]["observation"]
+                time_vals = obs_dims[0]["values"]
+                periods = [v["id"] for v in time_vals]
+
+                # Extract series values
+                series_data = data["dataSets"][0]["series"]
+                first_key = list(series_data.keys())[0]
+                obs = series_data[first_key]["observations"]
+
+                # Build series
+                rows = []
+                for idx_str, vals in obs.items():
+                    idx = int(idx_str)
+                    if idx < len(periods) and vals[0] is not None:
+                        rows.append({"date": periods[idx], "value": vals[0]})
+
+                df = pd.DataFrame(rows)
+                df["date"] = pd.to_datetime(df["date"])
+                df = df.set_index("date").sort_index()
+
+                st.success(f"✅ Parsed {len(df)} monthly rows — latest: {df['value'].iloc[-1]:.4f} on {df.index[-1].date()}")
+                st.write(df.tail(5))
+
+        except Exception as e:
+            st.error(f"❌ {country_code}: {e}")
 
     st.divider()
-
-    # ── OECD with corrected URL format ────────────────────────────────────────
-    st.subheader("OECD — corrected URLs")
-    oecd_urls = {
-        "GBR v1": "https://sdmx.oecd.org/public/rest/data/OECD.SDD.STES,DSD_KEI@DF_KEI,4.0/GBR.M.IRLTLT01.ST.....?format=csvfilewithlabels&startPeriod=2020-01",
-        "JPN v1": "https://sdmx.oecd.org/public/rest/data/OECD.SDD.STES,DSD_KEI@DF_KEI,4.0/JPN.M.IRLTLT01.ST.....?format=csvfilewithlabels&startPeriod=2020-01",
-        "GBR v2": "https://stats.oecd.org/sdmx-json/data/KEI/IRLTLT01.GBR.ST.M/all?startTime=2020-01&endTime=2025-12",
-        "JPN v2": "https://stats.oecd.org/sdmx-json/data/KEI/IRLTLT01.JPN.ST.M/all?startTime=2020-01&endTime=2025-12",
-    }
-    for label, url in oecd_urls.items():
-        try:
-            r = requests.get(url, timeout=15)
-            st.write(f"**{label}** HTTP {r.status_code} — {len(r.text)} chars — `{r.text[:100]}`")
-        except Exception as e:
-            st.error(f"❌ {label}: {e}")
-
-    st.divider()
-
-    # ── BIS (Bank for International Settlements) ──────────────────────────────
-    st.subheader("BIS API")
-    for label, url in {
-        "GB 10Y": "https://stats.bis.org/api/v2/data/BIS,WS_LONG_CPI,1.0/M.GB.L.L40.A.A.A.A.A?format=csv&startPeriod=2020-01",
-        "JP 10Y": "https://stats.bis.org/api/v2/data/BIS,WS_LONG_CPI,1.0/M.JP.L.L40.A.A.A.A.A?format=csv&startPeriod=2020-01",
-    }.items():
-        try:
-            r = requests.get(url, timeout=15)
-            st.write(f"**{label}** HTTP {r.status_code} — {len(r.text)} chars — `{r.text[:100]}`")
-        except Exception as e:
-            st.error(f"❌ BIS {label}: {e}")
-
-    st.divider()
-
-    # ── Bundesbank (DE) + direct central bank APIs ────────────────────────────
-    st.subheader("Direct central bank APIs")
-    apis = {
-        "Bundesbank DE 10Y": "https://api.bundesbank.de/service/data/BBDP/M.DE.EUR.BBK01.WT1010?format=sdmx-json&startPeriod=2020-01",
-        "BOJ JP 10Y (simple)": "https://www.stat-search.boj.or.jp/ssi/mtsindex/elabel_search.do?startDate=2023-01-01&endDate=&series=FM08%2FFM08_D_R_10Y&type=default&outputFormat=CSV",
-        "Investing GB 10Y": "https://api.investing.com/api/financialdata/2040/historical/chart?period=P1Y&interval=P1M&pointscount=60",
-    }
-    for label, url in apis.items():
-        try:
-            r = requests.get(url, timeout=15, headers={"User-Agent":"Mozilla/5.0"})
-            st.write(f"**{label}** HTTP {r.status_code} — {len(r.text)} chars — `{r.text[:100]}`")
-        except Exception as e:
-            st.error(f"❌ {label}: {e}")
-
-    st.divider()
-
-    # ── Stooq CSV (different from pandas_datareader) ──────────────────────────
-    st.subheader("Stooq direct CSV")
-    for label, sym in [("GB 10Y", "10gb.b"), ("JP 10Y", "10jp.b")]:
-        try:
-            url = f"https://stooq.com/q/d/l/?s={sym}&i=m"
-            r   = requests.get(url, timeout=15,
-                      headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
-            st.write(f"**{label} ({sym})** HTTP {r.status_code} — {len(r.text)} chars — `{r.text[:100]}`")
-        except Exception as e:
-            st.error(f"❌ Stooq {label}: {e}")
-
-    st.info("Share screenshot — any HTTP 200 with real data = our source!")
+    st.info("If all 4 show ✅ — OECD solves all pairs. Share screenshot!")
