@@ -635,6 +635,22 @@ def _pdr_fred(series_id: str) -> Optional[pd.Series]:
     return None
 
 
+# ── Dedicated cached fetchers for GB and JP — bypass all shared state ─────────
+# These are the only functions used for bond:GB and bond:JP.
+# Completely isolated — own requests.get, own cache, no shared session.
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _uk10y_daily() -> Optional[pd.Series]:
+    """UK 10Y gilt yield — FRED IRLTLT01GBM156N — fresh isolated fetch."""
+    return _fred_fresh("IRLTLT01GBM156N")
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _jp10y_daily() -> Optional[pd.Series]:
+    """Japan 10Y JGB yield — FRED IRLTLT01JPM156N — fresh isolated fetch."""
+    return _fred_fresh("IRLTLT01JPM156N")
+
+
 # ── Master bond yield dispatcher ──────────────────────────────────────────────
 
 # Country → (stooq_sym, fred_series)
@@ -770,7 +786,13 @@ def get_series(ticker: str, tf: str) -> Optional[pd.Series]:
     """Return price/yield series resampled to the requested timeframe."""
     rule = TIMEFRAMES[tf]
 
-    if ticker.startswith("bond:"):
+    if ticker == "bond:GB":
+        # Dedicated isolated fetcher — bypasses all shared session state
+        daily = _uk10y_daily()
+    elif ticker == "bond:JP":
+        # Dedicated isolated fetcher — bypasses all shared session state
+        daily = _jp10y_daily()
+    elif ticker.startswith("bond:"):
         daily = _bond_yield_daily(ticker[5:])
     else:
         daily = _yf_fetch(ticker)
